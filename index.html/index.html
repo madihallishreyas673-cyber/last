@@ -1,0 +1,131 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cafe Menu</title><link rel="stylesheet" href="style.css">
+<style>
+header{text-align:center;padding:26px 0 14px;position:relative}
+h1{font-size:2.1rem;color:var(--gold);letter-spacing:.06em;margin-top:30px}
+#chefBtn{position:absolute;right:0;top:14px;width:42px;height:42px;padding:0;display:grid;place-items:center;color:var(--gold)}
+.badge{display:inline-block;margin-top:10px;border:1px solid var(--gold);color:var(--gold);border-radius:999px;padding:3px 16px;font-weight:600}
+nav{position:sticky;top:0;background:#0f0b08f2;display:flex;gap:8px;overflow-x:auto;padding:12px 0;z-index:2}
+nav button{white-space:nowrap}
+h2{margin:22px 0 12px;font-size:1.35rem;scroll-margin-top:76px}
+.item{margin-bottom:10px}
+.dot{display:inline-block;width:12px;height:12px;border:1.5px solid #4caf50;margin-right:7px;position:relative}
+.dot:after{content:"";position:absolute;inset:2px;border-radius:50%;background:#4caf50}
+.dot.non{border-color:#e0605a}.dot.non:after{background:#e0605a}
+.price{color:var(--gold);font-weight:700}
+.qty{display:flex;align-items:center;gap:8px;flex:none}
+.qty button{width:36px;height:36px;padding:0}
+.add{min-width:84px}
+#bar{position:fixed;left:16px;right:16px;bottom:16px;max-width:648px;margin:auto;padding:15px 22px;z-index:3;box-shadow:0 8px 30px #000a}
+dialog{background:var(--card);color:var(--cream);border:1px solid var(--gold);border-radius:20px;padding:20px;width:min(440px,calc(100% - 32px));margin:auto}
+dialog::backdrop{background:#000c}
+dialog .row{margin:10px 0}
+.err{color:#ff9a8f;min-height:1.5em;margin:6px 0}
+#status{margin-top:16px;border-color:var(--gold)}
+#pin{text-align:center;font-size:1.8rem;letter-spacing:.5em;margin-top:12px}
+</style></head><body>
+<div class="wrap">
+<header>
+  <button id="chefBtn" aria-label="Staff access"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21 3 12h5V3h8v9h5z"/></svg></button>
+  <h1 id="name"></h1><p class="muted" id="tagline"></p><div class="badge" id="tableBadge"></div>
+</header>
+<div id="status" class="card" hidden></div>
+<nav id="tabs"></nav><main id="menu">Loading menu…</main>
+</div>
+<button id="bar" class="gold row" hidden></button>
+
+<dialog id="cartBox"><h3>Your order</h3><div id="lines"></div>
+  <textarea id="note" maxlength="200" rows="2" placeholder="Note for the chef (e.g. less sugar)"></textarea>
+  <div class="row"><b>Total</b><b class="price" id="total"></b></div><p class="muted">Pay at the counter.</p><p class="err" id="orderErr"></p>
+  <div class="row"><button id="closeCart">Back to menu</button><button class="gold" id="place">Place order</button></div>
+</dialog>
+
+<dialog id="pinBox"><form id="pinForm"><h3>Enter secret code</h3>
+  <input id="pin" type="password" inputmode="numeric" maxlength="8" autocomplete="off" aria-label="Secret code">
+  <p class="err" id="pinErr"></p><div class="row"><button type="button" id="closePin">Cancel</button><button class="gold">Enter</button></div>
+</form></dialog>
+
+<script src="menu.js"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const table = Number(new URLSearchParams(location.search).get('t'));
+const cart = {};
+const M = MENU;
+let items, valid = false;
+const money = n => M.currency + n;
+const store = { get(k){try{return JSON.parse(localStorage.getItem(k))}catch{return null}}, set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}} };
+let mine = store.get('orders-' + table) || [];
+
+async function load() {
+  items = Object.fromEntries(M.categories.flatMap(c => c.items).map(i => [i.id, i]));
+  valid = Number.isInteger(table) && table >= 1 && table <= M.tables;
+  document.title = M.cafeName + ' Menu';
+  $('name').textContent = M.cafeName; $('tagline').textContent = M.tagline;
+  $('tableBadge').textContent = valid ? 'Table ' + table : 'Scan your table QR to order';
+  $('tabs').innerHTML = M.categories.map((c,i) => `<button data-cat="${i}">${esc(c.name)}</button>`).join('');
+  if (!READY) $('tableBadge').textContent += ' · Online ordering not set up yet';
+  render(); poll();
+}
+function render() {
+  $('menu').innerHTML = M.categories.map((c,n) => `<h2 id="cat${n}">${esc(c.name)}</h2>` + c.items.map(i => `
+    <div class="card item row"><div><h3><span class="dot ${i.veg?'':'non'}" title="${i.veg?'Veg':'Non-veg'}"></span>${esc(i.name)}</h3>
+    <p class="muted">${esc(i.desc)}</p><p class="price">${money(i.price)}</p></div>${valid && READY ? control(i.id) : ''}</div>`).join('')).join('');
+  const count = Object.values(cart).reduce((a,b) => a+b, 0);
+  const total = Object.entries(cart).reduce((s,[id,q]) => s + items[id].price*q, 0);
+  $('bar').hidden = !count;
+  $('bar').innerHTML = `<span>${count} item${count>1?'s':''} · ${money(total)}</span><span>View order →</span>`;
+  $('total').textContent = money(total);
+  $('lines').innerHTML = Object.keys(cart).map(id => `<div class="row"><span>${esc(items[id].name)}</span>${control(id)}</div>`).join('');
+  if (!count && $('cartBox').open) $('cartBox').close();
+}
+const control = id => cart[id]
+  ? `<div class="qty"><button data-id="${esc(id)}" data-d="-1" aria-label="Remove one">−</button><b>${cart[id]}</b><button data-id="${esc(id)}" data-d="1" aria-label="Add one">+</button></div>`
+  : `<button class="add" data-id="${esc(id)}" data-d="1">Add</button>`;
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.cat) $('cat' + b.dataset.cat).scrollIntoView({behavior:'smooth'});
+  if (b.dataset.id) {
+    const id = b.dataset.id, q = Math.min(20, (cart[id]||0) + Number(b.dataset.d));
+    if (q > 0) cart[id] = q; else delete cart[id];
+    render();
+  }
+});
+$('bar').onclick = () => { $('orderErr').textContent = ''; $('cartBox').showModal(); };
+$('closeCart').onclick = () => $('cartBox').close();
+$('place').onclick = async () => {
+  $('place').disabled = true; $('orderErr').textContent = '';
+  try {
+    const d = await rpc('place_order', {p_table: table, p_items: Object.entries(cart).map(([id,qty]) => ({id,qty})), p_note: $('note').value});
+    mine = [...mine, {id: d.id, key: d.key}].slice(-5); store.set('orders-' + table, mine);
+    for (const k in cart) delete cart[k];
+    $('note').value = ''; $('cartBox').close(); render(); await poll(); scrollTo({top:0, behavior:'smooth'});
+  } catch (e) { $('orderErr').textContent = e instanceof TypeError ? 'No connection. Please try again.' : e.message; }
+  $('place').disabled = false;
+};
+const LABEL = {new:'Sent to the chef ✓', preparing:'Being prepared 👨‍🍳', ready:'Ready! 🎉', served:'Served', cancelled:'Cancelled. Please ask the staff.'};
+async function poll() {
+  if (!READY || !valid || !mine.length) return;
+  const found = await Promise.all(mine.map(o => rpc('order_status', {p_key: o.key}).catch(() => null)));
+  const live = found.filter((s,i) => s && s.id === mine[i].id && s.status !== 'served');
+  $('status').hidden = !live.length;
+  $('status').innerHTML = live.map(s => `<div class="row"><b>Order #${s.id}</b><span>${LABEL[s.status]}</span></div>`).join('');
+}
+setInterval(poll, 4000);
+
+$('chefBtn').onclick = () => { $('pin').value = ''; $('pinErr').textContent = ''; $('pinBox').showModal(); $('pin').focus(); };
+$('closePin').onclick = () => $('pinBox').close();
+$('pinForm').onsubmit = async e => {
+  e.preventDefault();
+  if (!READY) { $('pinErr').textContent = 'Finish the database setup first.'; return; }
+  try {
+    const d = await rpc('chef_login', {p_pin: $('pin').value});
+    if (d.error) { $('pinErr').textContent = d.error; $('pin').value = ''; return; }
+    sessionStorage.setItem('chef', d.token); location.href = 'chef.html';
+  } catch { $('pinErr').textContent = 'Could not connect. Check config.js and the database setup.'; }
+};
+load();
+</script></body></html>

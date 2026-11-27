@@ -1,0 +1,123 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chef Inbox</title><link rel="stylesheet" href="style.css">
+<style>
+header{padding:18px 0;flex-wrap:wrap}
+h1{color:var(--gold)}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.on{border-color:var(--gold);color:var(--gold)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.order.new{border:2px solid var(--gold)}
+.order h2{color:var(--gold)}
+.order ul{list-style:none;margin:10px 0;border-block:1px dashed var(--line);padding:8px 0;font-size:1.1rem}
+.note{background:#3a2a10;border-radius:10px;padding:6px 10px;margin-bottom:10px;overflow-wrap:anywhere}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.warn{color:#ff9a8f;margin-bottom:10px}
+.qr{background:#fff;color:#1a1006;border-radius:16px;padding:16px;text-align:center}
+.qr canvas{width:100%;max-width:230px}
+.qr h3{font-size:1.4rem}.qr button{background:#1a1006;color:#fff}
+@media print{body{background:#fff}.noprint{display:none!important}.grid{grid-template-columns:1fr 1fr}.qr{border:1px dashed #999;break-inside:avoid}.qr button{display:none}}
+</style></head><body><div class="wrap wide">
+<header class="row noprint"><h1>👨‍🍳 Chef Inbox</h1><div class="acts"><button id="sound">🔔 Turn sound on</button><button id="out">Lock</button></div></header>
+<p id="conn" class="warn noprint" role="status"></p>
+<div class="tabs noprint"><button data-view="active" class="on">Live orders</button><button data-view="done">History</button><button data-view="qr">Table QR codes</button></div>
+<section id="ordersView"><div class="tabs" id="tableFilter"></div><div class="grid" id="orders"></div></section>
+<section id="qrView" hidden>
+  <div class="card noprint" style="margin-bottom:14px"><label for="base"><b>Website address used inside the QR codes</b></label>
+  <input id="base" style="margin:8px 0" spellcheck="false"><p id="baseWarn" class="warn"></p><button class="gold" id="print">Print all QR codes</button></div>
+  <div class="grid" id="qrs"></div>
+</section></div>
+<script src="qrcode.js"></script>
+<script src="menu.js"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const token = sessionStorage.getItem('chef');
+if (!token) location.replace('./');
+const M = MENU;
+const ITEMS = Object.fromEntries(M.categories.flatMap(c => c.items).map(i => [i.id, i]));
+let orders = [], view = 'active', filter = 0, known = null, audio = null, last = '';
+
+// Names and prices always come from menu.js, never from the customer's phone.
+const fill = o => {
+  const items = o.items.map(l => ({qty: l.qty, name: ITEMS[l.id] ? ITEMS[l.id].name : 'Unknown item (' + l.id + ')', price: ITEMS[l.id] ? ITEMS[l.id].price : 0}));
+  return {...o, items, total: items.reduce((s,i) => s + i.price * i.qty, 0)};
+};
+const lock = () => { sessionStorage.removeItem('chef'); location.replace('./'); };
+async function call(name, args = {}) {
+  try { return await rpc(name, {p_token: token, ...args}); }
+  catch (e) { if (e.code === '28000') { lock(); throw new Error('locked'); } throw e; }
+}
+function beep() {
+  if (!audio) return;
+  [0, .25].forEach((t,i) => { const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = i ? 1175 : 880; g.gain.value = .25;
+    o.connect(g).connect(audio.destination); o.start(audio.currentTime + t); o.stop(audio.currentTime + t + .2); });
+}
+async function refresh() {
+  try {
+    orders = (await call('chef_orders')).map(fill); $('conn').textContent = '';
+    if (known !== null && orders.some(o => o.id > known)) beep();
+    known = Math.max(0, ...orders.map(o => o.id));
+    if (!$('base').value) { $('base').value = new URL('./', location.href).href; drawQR(); }
+    draw();
+  } catch (e) { if (e.message !== 'locked') $('conn').textContent = '⚠ Connection lost. New orders are not showing. Check your internet.'; }
+}
+const NEXT = {new:['preparing','Start preparing'], preparing:['ready','Mark ready'], ready:['served','Mark served']};
+function draw() {
+  const open = o => !!NEXT[o.status];
+  const base = orders.filter(o => view === 'done' ? !open(o) : open(o));
+  const waiting = orders.filter(o => o.status === 'new').length;
+  document.title = (waiting ? `(${waiting}) ` : '') + 'Chef Inbox';
+  const html = base.filter(o => !filter || o.table === filter).sort((a,b) => view === 'done' ? b.id - a.id : a.id - b.id).map(o => `
+    <article class="card order ${o.status}"><div class="row"><h2>Table ${o.table}</h2><b>${esc(o.status.toUpperCase())}</b></div>
+    <p class="muted">Order #${o.id} · ${new Date(o.time).toLocaleString([], {day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</p>
+    <ul>${o.items.map(i => `<li><b>${i.qty} ×</b> ${esc(i.name)}</li>`).join('')}</ul>
+    ${o.note ? `<p class="note">📝 ${esc(o.note)}</p>` : ''}<p class="price" style="margin-bottom:10px">Total ${esc(M.currency)}${o.total}</p>
+    ${open(o) ? `<div class="acts"><button class="gold" data-order="${o.id}" data-to="${NEXT[o.status][0]}">${NEXT[o.status][1]}</button><button data-order="${o.id}" data-to="cancelled">Cancel</button></div>` : ''}</article>`).join('')
+    || `<p class="muted">${view === 'done' ? 'No finished orders yet.' : 'No live orders. New ones appear here automatically.'}</p>`;
+  const chips = `<button data-table="0" class="${filter?'':'on'}">All tables</button>` + Array.from({length: M.tables}, (_,i) => {
+    const t = i+1, n = base.filter(o => o.table === t).length;
+    return `<button data-table="${t}" class="${filter===t?'on':''}">T${t}${n ? ` (${n})` : ''}</button>`; }).join('');
+  // Redraw only on change so buttons do not jump while being tapped.
+  if (html + chips !== last) { last = html + chips; $('orders').innerHTML = html; $('tableFilter').innerHTML = chips; }
+}
+function drawQR() {
+  const base = $('base').value.trim().replace(/\/+$/, '');
+  $('baseWarn').textContent = /^https:\/\/[^/]+\.github\.io/.test(base) ? '' : '⚠ This is not your GitHub Pages address. Check it before printing.';
+  $('qrs').innerHTML = '';
+  for (let t = 1; t <= M.tables; t++) {
+    const q = qrcode(0, 'M'); q.addData(`${base}/?t=${t}`); q.make();
+    const n = q.getModuleCount(), s = 12, pad = 4*s, size = n*s + pad*2;
+    const c = document.createElement('canvas'); c.width = size; c.height = size + 80;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0,0,c.width,c.height); x.fillStyle = '#000';
+    for (let r = 0; r < n; r++) for (let k = 0; k < n; k++) if (q.isDark(r,k)) x.fillRect(pad+k*s, pad+r*s, s, s);
+    x.textAlign = 'center'; x.font = 'bold 34px Georgia'; x.fillText(`Table ${t} · Scan to order`, size/2, size+16, size-20); x.font = '28px Georgia'; x.fillText(M.cafeName, size/2, size+60, size-20);
+    const box = document.createElement('div'); box.className = 'qr';
+    
+    const btn = document.createElement('button'); btn.textContent = `Download Table ${t}`;
+    btn.onclick = () => { const a = document.createElement('a'); a.download = `table-${t}-qr.png`; a.href = c.toDataURL('image/png'); a.click(); };
+    box.append(c, document.createElement('br'), btn); $('qrs').append(box);
+  }
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.view) {
+    view = b.dataset.view; filter = 0;
+    document.querySelectorAll('[data-view]').forEach(x => x.classList.toggle('on', x === b));
+    $('qrView').hidden = view !== 'qr'; $('ordersView').hidden = view === 'qr'; draw();
+  }
+  if (b.dataset.table) { filter = Number(b.dataset.table); draw(); }
+  if (b.dataset.order) {
+    if (b.dataset.to === 'cancelled' && !confirm('Cancel this order?')) return;
+    b.disabled = true;
+    try { await call('chef_set_status', {p_id: Number(b.dataset.order), p_status: b.dataset.to}); last = ''; await refresh(); }
+    catch { b.disabled = false; }
+  }
+});
+$('sound').onclick = () => { audio = audio || new AudioContext(); audio.resume(); beep(); $('sound').textContent = '🔔 Sound is on'; };
+$('base').oninput = () => { drawQR(); };
+$('print').onclick = () => print();
+$('out').onclick = async () => { await call('chef_logout').catch(()=>{}); lock(); };
+(async () => { if (!token) return; draw(); await refresh(); setInterval(refresh, 3000); })();
+</script></body></html>
